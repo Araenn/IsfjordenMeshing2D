@@ -1,4 +1,4 @@
-"""Gmsh helpers used by isfjordenmsh.py only."""
+"""Gmsh helpers used by isfjorden_msh.py only."""
 
 import gmsh
 import numpy as np

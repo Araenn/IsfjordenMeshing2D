@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.interpolate import NearestNDInterpolator
 
 
-# Edit VS_MODEL_PATH once, then run: python isfjordenmsh.py
+# Edit VS_MODEL_PATH once, then run: python isfjorden_msh.py
 ROOT = Path(__file__).resolve().parent
 VS_MODEL_PATH = Path(
     "/home/lea/Desktop/code/resonance_model/resonance_model/picking/"
