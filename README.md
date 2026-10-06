@@ -8,7 +8,7 @@ model and its processing scripts are not part of this repository.
 
 | File | Purpose |
 | --- | --- |
-| `isfjordenmsh.py` | Entry point, input paths and physical/mesh parameters |
+| `isfjorden_msh.py` | Entry point, input paths and physical/mesh parameters |
 | `meshing_functions.py` | Shared geometry, sediment material groups and Gmsh meshing |
 | `data/Isfjorden.txt` | Section geometry: `Distance_m`, `Basement`, `Seafloor` |
 | `requirements.txt` | Python dependencies |
@@ -44,18 +44,18 @@ the same section origin and vertical reference. The reader expects **CSV, not
 pickle**. It uses nearest-neighbour interpolation, including outside the sample
 extent; it does not estimate or regenerate the Vs model.
 
-Set `VS_MODEL_PATH` near the top of `isfjordenmsh.py` to the location of your
+Set `VS_MODEL_PATH` near the top of `isfjorden_msh.py` to the location of your
 external CSV. Its initial value retains the path from the supplied script.
 Then simply run:
 
 ```bash
-python isfjordenmsh.py
+python isfjorden_msh.py
 ```
 
 Alternatively, override the path without editing the script:
 
 ```bash
-python isfjordenmsh.py --vs-model /path/to/vs_model_2d_merged.csv --no-gui
+python isfjorden_msh.py --vs-model /path/to/vs_model_2d_merged.csv --no-gui
 ```
 
 Or set `ISFJORDEN_VS_MODEL` in your environment. Path precedence is command-line
@@ -65,7 +65,7 @@ from the repository directory, so launching from another directory also works.
 To validate your inputs before generating the mesh:
 
 ```bash
-python isfjordenmsh.py --check-inputs
+python isfjorden_msh.py --check-inputs
 ```
 
 ## Outputs and parameters
@@ -75,7 +75,7 @@ quadrilaterals only) and `output/materials_generated.json`. Outputs are ignored
 by Git. Use `--output-dir /path/to/output` to choose another destination, or
 `--geometry /path/to/section.txt` to use another section with the same format.
 
-Parameters are grouped at the top of `isfjordenmsh.py`: `FMAX=50 Hz`,
+Parameters are grouped at the top of `isfjorden_msh.py`: `FMAX=50 Hz`,
 `NPPW=6`, `MIN_VS=100 m/s`, `VS_BIN=10 m/s`, `N_VERTICAL=20`, mesh-size limits
 `LC_MIN=1 m` / `LC_MAX=20 m`, and basement padding `50 m`. Sediment target size
 is `Vs / (FMAX * NPPW)`, clipped to those limits and sampled at mid-depth in
@@ -93,17 +93,4 @@ refinement, so generation can be expensive.
 
 This repository stops at the `.msh` mesh and material JSON. Conversion to
 Exodus `.e`, receivers and solver configuration belong to the separate
-simulation workflow. `mesh2configJSON.py`, previous generated materials and
-alternate/legacy Vs section files are not needed here.
-
-## Publish to GitHub
-
-After extracting this folder, create an empty GitHub repository, then run:
-
-```bash
-git init -b main
-git add .
-git commit -m "Add standalone Isfjorden meshing workflow"
-git remote add origin <repository-url>
-git push -u origin main
-```
+simulation workflow.
