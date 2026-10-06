@@ -94,3 +94,249 @@ refinement, so generation can be expensive.
 This repository stops at the `.msh` mesh and material JSON. Conversion to
 Exodus `.e`, receivers and solver configuration belong to the separate
 simulation workflow.
+
+## How the mesh is built
+
+The workflow first constructs the geometry, assigns target mesh sizes and
+material groups, and then asks Gmsh to discretize the surfaces. Gmsh generates
+the mesh; it does not compute acoustic propagation or estimate material
+properties in this workflow.
+
+### 1. Read the section and define the three domains
+
+`load_inputs()` in `isfjorden_msh.py` reads the section file and shifts its
+distance axis so that the first sample is at `x=0`. At each horizontal position,
+the file provides the seafloor and basement elevations. These define:
+
+| Domain | Upper boundary | Lower boundary |
+| --- | --- | --- |
+| Water | Flat sea surface at `z=0` | Seafloor profile |
+| Sediments | Seafloor profile | Basement profile |
+| Basement rock | Basement profile | Flat bottom at `min(Basement) - BASEMENT_PADDING` |
+
+The left and right ends are closed with vertical boundaries. The bottom is
+50 m below the deepest basement sample by default, so the rock thickness
+varies along the section.
+
+The physical coordinates are called `(x, z)` in the scripts. Points are passed
+to Gmsh as `addPoint(x, z, 0, lc)`: the physical elevation is stored in Gmsh's
+second coordinate, and its third coordinate is zero. The mesh therefore lies
+in Gmsh's XY plane, even though it represents a vertical section. Preserve this
+convention when converting the mesh for a solver.
+
+### 2. Construct points, curves and surfaces
+
+The helpers use Gmsh's built-in geometry kernel, `gmsh.model.geo`.
+The construction follows this hierarchy:
+
+| Object | Role in this repository | Gmsh call |
+| --- | --- | --- |
+| Point | A position on an interface or inside the sediment grid | `addPoint()` |
+| Curve | A straight segment between two points | `addLine()` |
+| Curve loop | An ordered, closed set of boundary curves | `addCurveLoop()` |
+| Surface | The region enclosed by a curve loop | `addPlaneSurface()` |
+
+`add_points()` creates the interface points and assigns a target mesh size
+`lc` to each point. `add_edges()` connects consecutive points. The profiles
+are therefore piecewise linear: the mesh follows straight segments between
+the input samples rather than a smoothed spline.
+
+`add_outer_domain()` closes the water and rock regions around their shared
+interface profiles. Each is created as one geometric surface. The sediments
+are divided into many smaller surfaces, as described below.
+
+### 3. Divide the sediments into geometric cells
+
+`add_layer_variable_vs_2d()` places `N_VERTICAL + 1` points in each sediment
+column, including the seafloor and basement points. For column `i`, a point
+at subdivision index `j` has elevation:
+
+```text
+a = j / N_VERTICAL
+z(i, j) = (1 - a) * Seafloor(i) + a * Basement(i)
+```
+
+With `N_VERTICAL=20`, each column has 20 equal fractions of its local sediment
+thickness. Their thickness in metres varies with the separation between the
+two interfaces. Points at the same subdivision index are connected across
+adjacent columns, giving four-sided geometric cells that follow both profiles.
+
+For `nx` section samples, the number of sediment surfaces is:
+
+```text
+number_of_sediment_surfaces = (nx - 1) * N_VERTICAL
+```
+
+The supplied section has 4,985 samples, giving 99,680 sediment surfaces.
+**A geometric cell is not necessarily one final mesh element.** Gmsh can place
+multiple quadrilaterals inside it. Increasing `N_VERTICAL` changes the
+geometric and material sampling; it does not directly prescribe the final
+number of elements through the sediment thickness.
+
+### 4. Share interfaces between neighbouring regions
+
+Each sediment edge is created once and reused by its neighbouring cells.
+The water uses the same seafloor points and curves as the sediment grid;
+the rock uses the same basement points and curves.
+
+When building a curve loop, a negative curve tag means that the existing
+curve is traversed in the opposite direction. It does not create a second
+curve. This lets neighbouring surfaces use the same edge while closing their
+loops in the required order.
+
+Sharing these entities makes the interface mesh conforming: adjacent surfaces
+use the same mesh nodes along their common boundary. Creating separate,
+coincident curves would not by itself guarantee this connectivity. Whether
+those shared nodes are used correctly for acoustic/elastic coupling is then
+a responsibility of the solver and mesh conversion workflow.
+
+### 5. Use Vs to choose target element sizes
+
+The CSV reader converts `x_km` to metres and builds a nearest-neighbour
+interpolator in `(x, z)`. At any queried position, the interpolator returns
+the closest input sample's velocity. Positive values below `MIN_VS` are raised
+to `MIN_VS=100 m/s` before interpolation.
+
+The target size is based on the wavelength at the highest frequency:
+
+```text
+wavelength = wave_speed / FMAX
+target_size = wavelength / NPPW
+```
+
+For sediments, `generate_mesh()` queries Vs halfway between the seafloor and
+basement in each column. `lc_from_vs()` then computes:
+
+```text
+lc_sed(i) = clip(Vs_at_column_mid_depth / (FMAX * NPPW), LC_MIN, LC_MAX)
+```
+
+With `FMAX=50 Hz`, `NPPW=6` and the default size limits:
+
+| Mid-depth sediment Vs | Size before clipping | Assigned sediment size |
+| --- | --- | --- |
+| 100 m/s | 0.333 m | 1 m |
+| 300 m/s | 1 m | 1 m |
+| 600 m/s | 2 m | 2 m |
+
+Water uses `1500 / (FMAX * NPPW)`, or 5 m with the defaults. Rock uses its
+shear-wave speed, `1600 / (FMAX * NPPW)`, or about 5.33 m. At the seafloor,
+the assigned size is the smaller of the water and sediment targets; at the
+basement interface, it is the smaller of the rock and sediment targets.
+
+These sizes guide mesh generation; they are not exact final edge lengths.
+Small sizes on shared boundaries can also refine the neighbouring water or
+rock domain. The later subdivision step further increases mesh density.
+
+The sediment size is sampled once per column and used throughout that column,
+while material Vs is sampled separately in every geometric cell. It is not a
+depth-dependent sizing field. If Vs varies strongly with depth, the mid-depth
+value may miss a slower layer. Also, `LC_MIN=1 m` raises the 0.333 m target in
+the first example, so the sizing rule alone does not guarantee six elements
+per wavelength everywhere in the final mesh.
+
+### 6. Assign a material to each sediment cell
+
+For each sediment surface, `add_layer_variable_vs_2d()` queries Vs at the
+midpoint in horizontal position and in subdivision fraction. It rounds that
+value into a `VS_BIN` velocity class:
+
+```text
+Vs_class = max(MIN_VS, round(Vs / VS_BIN) * VS_BIN)
+material_name = "sed_vs_<Vs_class>"
+```
+
+For example, with `VS_BIN=10 m/s`, 143 m/s becomes `sed_vs_140` and 147 m/s
+becomes `sed_vs_150`. Every final element within that geometric surface inherits
+the same material class; Vs is not reevaluated at each final element's centre.
+
+Surfaces with the same class are collected into one **physical group**, even
+if they are spatially separated. After `gmsh.model.geo.synchronize()` makes
+the constructed geometry available to the model, `add_physical_group()`
+registers the following surface groups:
+
+| Physical group name | Numeric tag | Material JSON section |
+| --- | --- | --- |
+| `socle_1` | 1 | `acoustic_2d` (water) |
+| `socle_3` | 3 | `viscoelastic_2d` (rock) |
+| `sed_vs_*` | Starting at 1000 | `viscoelastic_2d` (sediments) |
+
+The first argument `2` in `addPhysicalGroup(2, ...)` identifies surfaces;
+it is their geometric dimension, not a material number. Sediment group tags
+are assigned in order of first occurrence, so use the group names to interpret
+the corresponding velocity classes.
+
+Gmsh stores the physical identifiers and names in the mesh. The script writes
+the associated density, wave speeds and attenuation parameters separately in
+`materials_generated.json`. Sediments use constant `rho=1800 kg/m³` and
+`vp=1800 m/s`; only their quantized Vs varies between classes. Editing the CSV
+does not change those other material constants.
+
+### 7. Generate quadrilateral elements
+
+`final_meshing()` sets the meshing options and calls
+`gmsh.model.mesh.generate(2)` to discretize curves and surfaces. The principal
+settings in this repository are:
+
+| Option | Value | Purpose |
+| --- | --- | --- |
+| `Mesh.Algorithm` | 8 | Frontal-Delaunay for Quads |
+| `Mesh.RecombineAll` | 1 | Recombine all surfaces |
+| `Mesh.RecombinationAlgorithm` | 1 | Blossom recombination |
+| `Mesh.SubdivisionAlgorithm` | 1 | Subdivide into quadrilaterals |
+| `Mesh.Smoothing` | 10 | Smooth the mesh |
+| `Mesh.ElementOrder` | 1 | First-order elements |
+| `Mesh.MshFileVersion` | 2.2 | Write the MSH 2.2 format |
+
+Recombination joins suitable triangle pairs into quadrilaterals. It may leave
+triangles, so subdivision produces an all-quadrilateral mesh, adding nodes and
+splitting existing elements. A four-sided geometric surface therefore does
+not imply that Gmsh simply fills it with a regular rectangular grid.
+
+The helper checks all generated 2D element types before writing the mesh.
+It accepts only Gmsh type 3, a four-node first-order quadrilateral, and raises
+an error if the mesh is empty or contains another 2D element type. This is an
+element-type check, not a numerical convergence or element-quality test.
+
+### 8. Export and inspect the result
+
+The mesh is written first, then the matching material JSON. With
+`Mesh.SaveAll=0`, exported elements belong to physical groups; all domain
+surfaces are grouped in this workflow. The scripts do not create named 1D
+boundary groups such as `xmin`, `xmax` or `zmin`. Any boundary names required
+by the solver must be handled in the downstream workflow.
+
+Without `--no-gui`, the Gmsh viewer opens after the files have been written.
+You can also reopen the mesh later with:
+
+```bash
+gmsh output/Isfjorden.msh
+```
+
+Zoom into the seafloor and basement interfaces to inspect the element layout,
+and examine mesh quality before using the result in a simulation. The material
+groups represent velocity classes, not an interpolated Vs colour field.
+`--check-inputs` only validates the geometry and CSV: it does not build the
+geometry in Gmsh or verify that meshing will succeed.
+
+### 9. Understand the main resolution controls
+
+| Parameter | Effect when increased |
+| --- | --- |
+| `FMAX` | Requests smaller elements; also sets `f_att` in the generated sediment and rock materials |
+| `NPPW` | Requests smaller elements without changing the material frequency parameter |
+| `N_VERTICAL` | Creates more sediment surfaces and samples material Vs more finely through the thickness |
+| `VS_BIN` | Uses coarser velocity classes, usually reducing the number of material groups |
+| `LC_MIN` | Prevents smaller sediment sizing targets, potentially relaxing wavelength resolution |
+| `LC_MAX` | Allows larger sediment sizing targets where Vs is high enough |
+
+Geometry sampling, material sampling and final element size are separate
+controls. Refining the mesh alone does not recover detail lost when Vs was
+assigned to geometric cells. Conversely, decreasing `VS_BIN` gives finer
+velocity classes without directly refining the mesh. Select these parameters
+together, then assess convergence with the intended wave solver.
+
+For Gmsh concepts and option definitions, see the official
+[Gmsh manual](https://gmsh.info/doc/texinfo/gmsh.html), especially
+[tutorial t1: geometry and physical groups](https://gmsh.info/doc/texinfo/gmsh.html#t1)
+and [tutorial t11: quadrangular meshes](https://gmsh.info/doc/texinfo/gmsh.html#t11).
