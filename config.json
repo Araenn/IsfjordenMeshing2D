@@ -1,0 +1,61 @@
+{
+  "dt": 3e-5,
+  "nstep": 13334,
+  "time_scheme": "SRKN3",
+  "output":"output_test",
+    "histogram": {
+        "num_bin":20 
+    },
+
+  "mesh": "/cluster/home/leay/specfem-waves/config/Isfjorden.e",
+
+  "materials": "/cluster/home/leay/specfem-waves/config/materials_generated.json",
+
+  "sources": {
+    "acoustic_2d": {
+      "type": "Ricker",
+      "position": [3290.0, 0.0],
+      "amplitude": 10000000.0,
+      "frequency": 50.0
+    }
+  },
+
+  "receivers": "/cluster/home/leay/specfem-waves/config/receivers_generated.json",
+"callbacks": {
+        "acoustic_2d": {
+            "movie": {
+                "path": "acoustic_2d.xdmf",
+                "movie_type": [
+                    "displacement",
+                    "potential"
+                ],
+                "optional_fields": [
+                    "vp", "mpi_rank"
+                ],
+                "every": 2000
+            },
+            "sponge": {
+                "alpha": 0.01,
+                "length": 250.0,
+                "surface_names": ["xmin", "xmax"]
+            }
+        },
+                "viscoelastic_2d": {
+            "movie": {
+                "path": "viscoelastic_2d.xdmf",
+                "movie_type": [
+                    "displacement", "curl_displacement", "div_displacement"
+                ],
+                "optional_fields": [
+                    "vp", "vs", "mpi_rank"
+                ],
+                "every": 2000
+            },
+            "sponge": {
+                "alpha": 0.01,
+                "length": 250.0,
+                "surface_names": ["xmin", "xmax", "zmin"]
+            }
+        }
+    }
+}

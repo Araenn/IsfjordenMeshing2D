@@ -95,23 +95,48 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
         bottom_pts = msh.add_points(basement, np.minimum(lc_sed, lc_basement), x)
         top_edges = msh.add_edges(top_pts)
         bottom_edges = msh.add_edges(bottom_pts)
-        water = msh.add_outer_domain(
+        water, water_boundary = msh.add_outer_domain(
             top_pts, top_edges, x, 0.0, lc_water, above=True
         )
-        sediment_materials, sediment_groups = msh.add_layer_variable_vs_2d(
+        (
+            sediment_materials, sediment_groups,
+            interface_groups, sediment_boundary,
+        ) = msh.add_layer_variable_vs_2d(
             seafloor, basement, x, interp_vs, lc_sed,
             top_pts, bottom_pts, top_edges, bottom_edges,
             n_vertical=N_VERTICAL, vs_bin=VS_BIN, min_vs=MIN_VS, f_att=FMAX,
         )
-        rock = msh.add_outer_domain(
+        rock, rock_boundary = msh.add_outer_domain(
             bottom_pts, bottom_edges, x, float(basement.min() - BASEMENT_PADDING),
             lc_basement, above=False,
         )
         gmsh.model.geo.synchronize()
+
+        # 2-D material blocks.
         msh.add_physical_group([water], 1, "socle_1")
         msh.add_physical_group([rock], 3, "socle_3")
         for index, (name, surfaces) in enumerate(sediment_groups.items()):
             msh.add_physical_group(surfaces, 1000 + index, name)
+
+        # 1-D side sets are defined explicitly in the geometry.  This avoids
+        # inferring boundaries from node coordinates in gmsh2exodus.py.
+        msh.add_physical_curve_group(
+            [water_boundary["left"], *sediment_boundary["left"], rock_boundary["left"]],
+            20000, "xmin",
+        )
+        msh.add_physical_curve_group(
+            [water_boundary["right"], *sediment_boundary["right"], rock_boundary["right"]],
+            20001, "xmax",
+        )
+        msh.add_physical_curve_group([rock_boundary["outer"]], 20002, "zmin")
+        msh.add_physical_curve_group([water_boundary["outer"]], 20003, "zmax")
+
+        # Only the upper sediment row is coupled to water.  Keep the material
+        # name in the side-set name so SPECFEM-WAVE sees the actual two blocks.
+        for index, (name, curves) in enumerate(interface_groups.items()):
+            msh.add_physical_curve_group(
+                curves, 21000 + index, f"socle_1|{name}"
+            )
 
         mesh_path = output_dir / "Isfjorden.msh"
         msh.final_meshing(mesh_path)

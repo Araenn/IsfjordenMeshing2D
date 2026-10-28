@@ -19,24 +19,43 @@ def add_edges(points):
 
 
 def add_outer_domain(interface_points, interface_edges, x, outer_z, lc, above):
-    """Use the sediment interface curves directly for water or basement."""
+    """Create water or basement and return its explicit exterior curves.
+
+    The interface curves themselves are reused, so the mesh is conforming.
+    Returning the exterior curves lets the caller create exact 1-D physical
+    groups for xmin/xmax/zmin/zmax instead of reconstructing them later from
+    element coordinates.
+    """
     left = factory.addPoint(float(x[0]), float(outer_z), 0, float(lc))
     right = factory.addPoint(float(x[-1]), float(outer_z), 0, float(lc))
+
     if above:
+        outer = factory.addLine(left, right)
+        right_edge = factory.addLine(right, interface_points[-1])
+        left_edge = factory.addLine(interface_points[0], left)
         edges = [
-            factory.addLine(left, right),
-            factory.addLine(right, interface_points[-1]),
+            outer,
+            right_edge,
             *[-edge for edge in reversed(interface_edges)],
-            factory.addLine(interface_points[0], left),
+            left_edge,
         ]
     else:
+        right_edge = factory.addLine(interface_points[-1], right)
+        outer = factory.addLine(right, left)
+        left_edge = factory.addLine(left, interface_points[0])
         edges = [
             *interface_edges,
-            factory.addLine(interface_points[-1], right),
-            factory.addLine(right, left),
-            factory.addLine(left, interface_points[0]),
+            right_edge,
+            outer,
+            left_edge,
         ]
-    return factory.addPlaneSurface([factory.addCurveLoop(edges)])
+
+    surface = factory.addPlaneSurface([factory.addCurveLoop(edges)])
+    return surface, {
+        "outer": outer,
+        "left": left_edge,
+        "right": right_edge,
+    }
 
 
 def add_layer_variable_vs_2d(
@@ -62,6 +81,7 @@ def add_layer_variable_vs_2d(
     horizontal.append(bottom_edges)
     vertical = [add_edges(column) for column in grid]
     groups = {}
+    top_interface_groups = {}
     for ix in range(len(x) - 1):
         for iz in range(n_vertical):
             loop = factory.addCurveLoop([
@@ -79,6 +99,9 @@ def add_layer_variable_vs_2d(
             vs_round = max(min_vs, round(vs / vs_bin) * vs_bin)
             name = f"sed_vs_{vs_round:g}"
             groups.setdefault(name, []).append(surface)
+            if iz == 0:
+                # Exact water/sediment geometric curve for this material bin.
+                top_interface_groups.setdefault(name, []).append(top_edges[ix])
 
     materials = {
         name: {
@@ -87,12 +110,25 @@ def add_layer_variable_vs_2d(
         }
         for name in groups
     }
-    return materials, groups
+    boundary_curves = {
+        "left": list(vertical[0]),
+        "right": list(vertical[-1]),
+    }
+    return materials, groups, top_interface_groups, boundary_curves
 
 
 def add_physical_group(surfaces, tag, name):
     gmsh.model.addPhysicalGroup(2, surfaces, tag)
     gmsh.model.setPhysicalName(2, tag, name)
+
+
+def add_physical_curve_group(curves, tag, name):
+    """Create an explicit 1-D physical group used as an Exodus side set."""
+    curves = list(dict.fromkeys(int(c) for c in curves))
+    if not curves:
+        raise ValueError(f"Physical curve group {name!r} is empty")
+    gmsh.model.addPhysicalGroup(1, curves, tag)
+    gmsh.model.setPhysicalName(1, tag, name)
 
 
 def lc_from_vs(vs, fmax=50.0, nppw=6, lc_min=1.0, lc_max=20.0):

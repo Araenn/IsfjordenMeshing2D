@@ -6,3 +6,4 @@ output/
 *.msh
 vs_model_2d*.csv
 vs_model_2d*.pkl
+*vtk
