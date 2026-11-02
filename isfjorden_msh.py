@@ -30,6 +30,29 @@ LC_MAX = 20.0
 BASEMENT_PADDING = 50.0
 
 
+# Water-only mesh optimization. Geometry and material interfaces are unchanged.
+WATER_LC_FAR = 8.0
+WATER_BOTTOM_KEEP_DISTANCE = 5.0
+WATER_BOTTOM_TRANSITION_DISTANCE = 35.0
+
+# Keep the original 5 m water resolution around source/receiver neighbourhoods.
+WATER_PROTECTED_LC = 5.0
+WATER_PROTECTED_KEEP_RADIUS = 20.0
+WATER_PROTECTED_TRANSITION_RADIUS = 50.0
+
+# Acoustic source and receiver-group centres. The 20 m protected radius fully
+# contains the current +/-10 m ST receiver ellipses.
+ACOUSTIC_SOURCE = (3290.0, 0.0)
+ACOUSTIC_RECEIVER_CENTRES = (
+    (4573.68, -120.98),   # STA
+    (16674.96, -159.86),  # STB
+)
+
+# Keep the known-good full-quad route while validating adaptive water sizing.
+# Set to False later to benchmark mesh generation without global subdivision.
+USE_GLOBAL_QUAD_SUBDIVISION = False
+
+
 def resolve_path(path):
     """Resolve relative configuration paths from the repository directory."""
     path = Path(path).expanduser()
@@ -112,6 +135,22 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
         )
         gmsh.model.geo.synchronize()
 
+        interface_lc = np.minimum(lc_sed, lc_water)
+        protected_points = (ACOUSTIC_SOURCE, *ACOUSTIC_RECEIVER_CENTRES)
+        msh.configure_adaptive_water_mesh(
+            water_surface=water,
+            x=x,
+            seafloor=seafloor,
+            interface_lc=interface_lc,
+            lc_far=WATER_LC_FAR,
+            bottom_keep_distance=WATER_BOTTOM_KEEP_DISTANCE,
+            bottom_transition_distance=WATER_BOTTOM_TRANSITION_DISTANCE,
+            protected_points=protected_points,
+            protected_lc=WATER_PROTECTED_LC,
+            protected_keep_radius=WATER_PROTECTED_KEEP_RADIUS,
+            protected_transition_radius=WATER_PROTECTED_TRANSITION_RADIUS,
+        )
+
         # 2-D material blocks.
         msh.add_physical_group([water], 1, "socle_1")
         msh.add_physical_group([rock], 3, "socle_3")
@@ -138,8 +177,18 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
                 curves, 21000 + index, f"socle_1|{name}"
             )
 
-        mesh_path = output_dir / "Isfjorden.msh"
-        msh.final_meshing(mesh_path)
+        mesh_path = output_dir / "Isfjorden_test.msh"
+        msh.final_meshing(
+            mesh_path,
+            use_global_quad_subdivision=USE_GLOBAL_QUAD_SUBDIVISION,
+            water_surface=water,
+            sediment_surfaces=[
+                surface
+                for surfaces in sediment_groups.values()
+                for surface in surfaces
+            ],
+            rock_surface=rock,
+        )
         materials = {
             "acoustic_2d": {"socle_1": {"rho": 1000, "vp": 1500}},
             "viscoelastic_2d": {
@@ -150,7 +199,7 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
                 },
             },
         }
-        materials_path = output_dir / "materials_generated.json"
+        materials_path = output_dir / "materials_generated_test.json"
         materials_path.write_text(json.dumps(materials, indent=2) + "\n", encoding="utf-8")
         print(f"Mesh written: {mesh_path}")
         print(f"Materials written: {materials_path}")
