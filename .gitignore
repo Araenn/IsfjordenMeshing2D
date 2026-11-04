@@ -8,3 +8,5 @@ vs_model_2d*.csv
 vs_model_2d*.pkl
 *vtk
 run_specfem_gpu.sh
+*.log
+*.e

@@ -1,4 +1,4 @@
-"""Generate an Isfjorden mesh from geometry and an external 2D Vs CSV."""
+"""Isfjorden main: generate one conforming all-quad .msh, with automatic local repair."""
 
 import argparse
 import json
@@ -17,7 +17,7 @@ VS_MODEL_PATH = Path(
     "vs_model_2d_merged.csv"
 )
 GEOMETRY_PATH = ROOT / "data" / "Isfjorden.txt"
-OUTPUT_DIR = ROOT / "output"
+OUTPUT_DIR = ROOT / "output_mesh"
 
 # Original physical and mesh parameters.
 FMAX = 50.0
@@ -51,6 +51,14 @@ ACOUSTIC_RECEIVER_CENTRES = (
 # Keep the known-good full-quad route while validating adaptive water sizing.
 # Set to False later to benchmark mesh generation without global subdivision.
 USE_GLOBAL_QUAD_SUBDIVISION = False
+
+# Fully structured quads in sediment cells. 95% is a controlled compromise:
+# because all vertical curves in a layer must share their node count, one deep
+# outlier must not force huge refinement over the full 20 km section.
+# Set to 100.0 to enforce the original target size even in the deepest column.
+SEDIMENT_VERTICAL_PERCENTILE = 95.0
+MAX_SEDIMENT_QUADS = 3_500_000
+
 
 
 def resolve_path(path):
@@ -99,7 +107,7 @@ def load_inputs(geometry_path, vs_model_path):
     return x, basement, seafloor, interp
 
 
-def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
+def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui, outer_algorithm=5):
     """Build connected water, sediment and basement domains, then write outputs."""
     import gmsh
     import meshing_functions as msh
@@ -109,6 +117,25 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
     lc_sed = msh.lc_from_vs(
         interp_vs(x, 0.5 * (seafloor + basement)), FMAX, NPPW, LC_MIN, LC_MAX
     )
+    # If the requested structured grid would explode the element count,
+    # abort before allocating 100k surfaces and running the 2-D mesher.
+    msh.configure_transfinite_sediment_mesh(
+        {}, x, seafloor, basement, lc_sed,
+        n_vertical=N_VERTICAL,
+        vertical_percentile=SEDIMENT_VERTICAL_PERCENTILE,
+        max_sediment_quads=MAX_SEDIMENT_QUADS,
+        dry_run=True,
+    )
+    # Preflight output safety before any expensive Gmsh generation.
+    if (output_dir / 'Isfjorden.msh').exists() or (output_dir / 'materials_generated.json').exists():
+        raise RuntimeError(f'{output_dir} already contains a canonical mesh/materials. '
+                           'Move/backup the previous result explicitly before generating again.')
+    # Do not regenerate millions of cells if a previous repair failed: resume
+    # from its raw Gmsh checkpoint through the existing repair_mesh.py tool.
+    checkpoint = output_dir / 'Isfjorden.unrepaired.msh'
+    if checkpoint.exists():
+        raise RuntimeError(f'Unrepaired mesh checkpoint already exists: {checkpoint}. '
+                           'Resume with repair_mesh.py --repair instead of generating again.')
     output_dir.mkdir(parents=True, exist_ok=True)
     gmsh.initialize()
     try:
@@ -123,7 +150,7 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
         )
         (
             sediment_materials, sediment_groups,
-            interface_groups, sediment_boundary,
+            interface_groups, sediment_boundary, structured_grid,
         ) = msh.add_layer_variable_vs_2d(
             seafloor, basement, x, interp_vs, lc_sed,
             top_pts, bottom_pts, top_edges, bottom_edges,
@@ -134,6 +161,13 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
             lc_basement, above=False,
         )
         gmsh.model.geo.synchronize()
+
+        msh.configure_transfinite_sediment_mesh(
+            structured_grid, x, seafloor, basement, lc_sed,
+            n_vertical=N_VERTICAL,
+            vertical_percentile=SEDIMENT_VERTICAL_PERCENTILE,
+            max_sediment_quads=MAX_SEDIMENT_QUADS,
+        )
 
         interface_lc = np.minimum(lc_sed, lc_water)
         protected_points = (ACOUSTIC_SOURCE, *ACOUSTIC_RECEIVER_CENTRES)
@@ -177,7 +211,9 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
                 curves, 21000 + index, f"socle_1|{name}"
             )
 
-        mesh_path = output_dir / "Isfjorden_test.msh"
+        mesh_path = output_dir / "Isfjorden.msh"
+        if mesh_path.exists():
+            raise RuntimeError(f"Refusing to overwrite existing mesh: {mesh_path}")
         msh.final_meshing(
             mesh_path,
             use_global_quad_subdivision=USE_GLOBAL_QUAD_SUBDIVISION,
@@ -188,6 +224,9 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
                 for surface in surfaces
             ],
             rock_surface=rock,
+            top_interface_curves=top_edges,
+            bottom_interface_curves=bottom_edges,
+            unstructured_algorithm=outer_algorithm,
         )
         materials = {
             "acoustic_2d": {"socle_1": {"rho": 1000, "vp": 1500}},
@@ -199,7 +238,9 @@ def generate_mesh(x, basement, seafloor, interp_vs, output_dir, show_gui):
                 },
             },
         }
-        materials_path = output_dir / "materials_generated_test.json"
+        materials_path = output_dir / "materials_generated.json"
+        if materials_path.exists():
+            raise RuntimeError(f"Refusing to overwrite existing material file: {materials_path}")
         materials_path.write_text(json.dumps(materials, indent=2) + "\n", encoding="utf-8")
         print(f"Mesh written: {mesh_path}")
         print(f"Materials written: {materials_path}")
@@ -220,7 +261,12 @@ def main(argv=None):
     parser.add_argument("--geometry", type=Path, default=GEOMETRY_PATH)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--no-gui", action="store_true", help="Generate without opening Gmsh.")
+    parser.add_argument("--outer-algorithm", type=int, choices=(5, 6, 8), default=5,
+                        help="Classical unstructured 2-D algorithm for water/basement: "
+                             "5=Delaunay (default); 6=Frontal-Delaunay; 8=Frontal-quad.")
     parser.add_argument("--check-inputs", action="store_true", help="Validate inputs without meshing.")
+    parser.add_argument("--plan-only", action="store_true",
+                        help="Estimate structured sediment element count without building geometry.")
     args = parser.parse_args(argv)
     try:
         inputs = load_inputs(resolve_path(args.geometry), resolve_path(args.vs_model))
@@ -229,7 +275,23 @@ def main(argv=None):
     if args.check_inputs:
         print("Inputs are valid.")
         return
-    generate_mesh(*inputs, resolve_path(args.output_dir), not args.no_gui)
+    if args.plan_only:
+        import meshing_functions as msh
+        x, basement, seafloor, interp_vs = inputs
+        lc_sed = msh.lc_from_vs(
+            interp_vs(x, 0.5 * (seafloor + basement)),
+            FMAX, NPPW, LC_MIN, LC_MAX,
+        )
+        msh.configure_transfinite_sediment_mesh(
+            {}, x, seafloor, basement, lc_sed,
+            n_vertical=N_VERTICAL,
+            vertical_percentile=SEDIMENT_VERTICAL_PERCENTILE,
+            max_sediment_quads=MAX_SEDIMENT_QUADS,
+            dry_run=True,
+        )
+        return
+    generate_mesh(*inputs, resolve_path(args.output_dir), not args.no_gui,
+                  outer_algorithm=args.outer_algorithm)
 
 
 if __name__ == "__main__":

@@ -286,7 +286,8 @@ def parse_elements_2_2_binary(file, size_of_size_t, endian, cache=None):
     num_elements = int(file.readline().rstrip())
     df = list()
     e = "<" if endian == "little" else ">"
-    for _ in range(num_elements):
+    processed = 0
+    while processed < num_elements:
         element_type = parse_elements_4_1_binary.element_types[int.from_bytes(file.read(4), endian)]
         element_size = parse_elements_4_1_binary.element_size.get(element_type, 0)
         if element_size == 0:
@@ -301,6 +302,9 @@ def parse_elements_2_2_binary(file, size_of_size_t, endian, cache=None):
             tags = np.frombuffer(file.read(4*(num_tags-2)), f"{e}i{4}")
             node_index = np.frombuffer(file.read(4*element_size), f"{e}i{4}")
             df.append([index, element_type, entity_tag, model_tag, tags, node_index])
+        processed += num_elements_in_block
+        if processed > num_elements:
+            raise ValueError('Gmsh element count mismatch')
     file.read(1)  # should be '\n'
     test_end_of_section(file.readline(), '$EndElements', True)
     df = pd.DataFrame(df, columns=['tag', 'element_type', 'entity_tag', 'model_tag', 'element_tag', 'node_index']
@@ -387,7 +391,7 @@ parse_elements_4_1_binary.element_types = [None,  # types and order from GmshDef
             'PYR_21', 'PYR_29', 'PYR_37', 'PYR_45', 'PYR_53', 'PYR_61', 'PYR_69',  # incomplete pyramid order 3 -> 9
             'PYR_1', 'PNT_SUB', 'LIN_SUB', 'TRI_SUB', 'TET_SUB', 'TET_16', 'TRI_MINI', 'TET_MINI',  # additional types
             'TRIH_4']  # Tri hedron -- One quad face and two triangular faces -- made for connecting hexes and tets
-parse_elements_4_1_binary.element_size = {'QUA_4': 4, 'QUA_8': 8, 'QUA_9': 9, 'Hex_8': 8, 'Hex_20': 20, 'Hex_27': 27}
+parse_elements_4_1_binary.element_size = {'LIN_2': 2, 'QUA_4': 4, 'QUA_8': 8, 'QUA_9': 9, 'Hex_8': 8, 'Hex_20': 20, 'Hex_27': 27}
 
 
 def parse_periodic():

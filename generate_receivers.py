@@ -6,7 +6,7 @@ import numpy as np
 # Paramètres
 # =========================
 
-output_file = Path("output/receivers_generated.json")
+output_file = Path(__file__).resolve().parent / "output_mesh" / "receivers_generated.json"
 
 dx = 1.0
 half_width = 20.0
