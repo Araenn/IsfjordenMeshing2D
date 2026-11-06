@@ -1,6 +1,6 @@
 {
-  "dt": 3e-5,
-  "nstep": 13334,
+  "dt": 5e-6,
+  "nstep": 80000,
   "time_scheme": "SRKN3",
   "output":"output_test",
     "histogram": {
@@ -14,7 +14,7 @@
   "sources": {
     "acoustic_2d": {
       "type": "Ricker",
-      "position": [3290.0, 0.0],
+      "position": [3290.0, -5],
       "amplitude": 10000000.0,
       "frequency": 50.0
     }
@@ -32,7 +32,7 @@
                 "optional_fields": [
                     "vp", "mpi_rank"
                 ],
-                "every": 2000
+                "every": 5000
             },
             "sponge": {
                 "alpha": 0.01,
@@ -44,12 +44,12 @@
             "movie": {
                 "path": "viscoelastic_2d.xdmf",
                 "movie_type": [
-                    "displacement", "curl_displacement", "div_displacement"
+                    "displacement"
                 ],
                 "optional_fields": [
                     "vp", "vs", "mpi_rank"
                 ],
-                "every": 2000
+                "every": 5000
             },
             "sponge": {
                 "alpha": 0.01,

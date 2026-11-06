@@ -1,25 +1,74 @@
-# Isfjorden meshing
+# Isfjorden — 2D hybrid quadrilateral meshing
 
-Generate a 2D quadrilateral mesh of water, sediments and basement from the
-Isfjorden section and an **external 2D shear-wave velocity model**. The resonance
-model and its processing scripts are not part of this repository.
-The repository also includes a small exporter to create the section geometry
-TXT from an already generated external model pickle.
+Generate a **conforming, first-order, all-quadrilateral 2D mesh** of the Isfjorden
+water column, layered sediments and basement, using section geometry and an
+**external 2D shear-wave velocity (Vs) model**.
 
-## Files
+The current generator uses a **hybrid strategy**: structured transfinite
+quadrilaterals in the sediments, conventional unstructured Gmsh meshing with
+Blossom recombination in the water and basement, and **automatic local repair**
+of residual triangles. It validates the mesh **after writing and reopening the
+MSH file**. It does not run a solver.
 
-| File | Purpose |
+> **Validated configuration (4 November 2026).** With the supplied section,
+> external Vs CSV, default parameters and outer algorithm `5`, the complete
+> generation-and-repair workflow produced **2,621,186 quads, no triangles and
+> 2,625,311 nodes**. The global minimum `minSICN` was **0.05129357**; no quad
+> had `minSICN <= 0.05` and 34 quads had `minSICN < 0.1`. Physical groups,
+> geometry, interface edges, boundary closure and the reopened file passed the
+> implemented checks. These are **geometric** checks, not proof of numerical
+> stability or solver convergence. Results may change with Gmsh, inputs or
+> parameters.
+
+## 1. Project layout
+
+The mesh generation workflow is intentionally limited to **three Python files**:
+
+| File | Responsibility |
 | --- | --- |
-| `isfjorden_msh.py` | Entry point, input paths and physical/mesh parameters |
-| `meshing_functions.py` | Shared geometry, sediment material groups and Gmsh meshing |
-| `convertDataMain.py` | Generate the geometry TXT; configure the external pickle, output path and horizontal step |
-| `convertDatasFunctions.py` | Only the two geometry-export helpers: read the pickle and export the interface profiles |
-| `data/Isfjorden.txt` | Section geometry: `Distance_m`, `Basement`, `Seafloor`; can be regenerated with the exporter |
+| `isfjorden_msh.py` | Single entry point: inputs, parameters, geometry assembly, generation and final outputs |
+| `meshing_functions.py` | Shared geometry functions, transfinite sizing, water sizing, physical groups, local repairs and mesh validation |
+| `repair_mesh.py` | Optional fallback: validate, adopt or repair an **existing** MSH without regenerating the geometry |
+
+Other files have separate roles:
+
+| File / directory | Purpose |
+| --- | --- |
+| `data/Isfjorden.txt` | Input section geometry (`Distance_m`, `Basement`, `Seafloor`) |
+| `convertDataMain.py`, `convertDatasFunctions.py` | Optional geometry-TXT exporter from an external model pickle |
+| `config.json` | Configuration for other project utilities; meshing parameters are currently defined in `isfjorden_msh.py` |
 | `requirements.txt` | Python dependencies |
+| `output_mesh/` | Canonical validated mesh and matching material definitions |
+| `gmsh2exodus.py`, `check_exodus_sides_specfem.py` | Separate, optional downstream conversion/verification tools; **not run by the mesh generator** |
+| `generate_receivers.py`, `run_specfem_gpu.sh` | Separate simulation preparation and execution tools |
 
-## Installation
+Archived trials, diagnostic scripts and earlier meshes are not required for a
+normal run. Keep any old validated results outside `output_mesh/` instead of
+mixing them with current outputs.
 
-Use Python 3.10 or newer:
+### Typical directory structure
+
+```text
+meshing/
+├── data/
+│   └── Isfjorden.txt
+├── isfjorden_msh.py
+├── meshing_functions.py
+├── repair_mesh.py
+├── convertDataMain.py
+├── convertDatasFunctions.py
+├── gmsh2exodus.py                 
+├── config.json
+├── requirements.txt
+├── README.md
+└── output_mesh/
+    ├── Isfjorden.msh
+    └── materials_generated.json
+```
+
+## 2. Installation and inputs
+
+Use Python **3.10 or later** in an environment with the project's dependencies:
 
 ```bash
 python -m venv .venv
@@ -27,404 +76,414 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Ubuntu, if importing Gmsh reports a missing `libGLU.so.1`, install
-`libglu1-mesa` (`sudo apt install libglu1-mesa`). A display is required for the
-Gmsh viewer; use `--no-gui` for a terminal-only run. Minimal Linux environments
-may also need `libxft2` if the Gmsh import reports a missing `libXft.so.2`.
+Core meshing uses Gmsh's Python API, NumPy, pandas and SciPy. On Ubuntu, missing
+`libGLU.so.1` or `libXft.so.2` may require the system packages `libglu1-mesa`
+and `libxft2`. A display is only necessary for the Gmsh viewer; use `--no-gui`
+for terminal-only generation.
 
-## External Vs model
-
-Two external inputs serve different purposes:
+Two **external inputs** serve different purposes; they are not generated by the
+meshing pipeline:
 
 | Input | Used by | Purpose |
 | --- | --- | --- |
-| `vs_model_2d.pkl` | `convertDataMain.py` | Extract the seafloor and basement to generate `data/Isfjorden.txt` |
-| `vs_model_2d_merged.csv` | `isfjorden_msh.py` | Sample Vs to size the mesh and assign sediment materials |
+| `vs_model_2d.pkl` | `convertDataMain.py` (optional) | Extract seafloor and basement profiles into `data/Isfjorden.txt` |
+| `vs_model_2d_merged.csv` | `isfjorden_msh.py` | Determine sediment target sizes and material Vs classes |
 
-The filenames can be changed through the script configuration or command-line
-options. Both inputs must describe the same section with consistent horizontal
-and vertical references; this repository does not create either Vs model.
+The CSV must have numerical columns:
 
-Use the `vs_model_2d_merged.csv` generated by the separate resonance-model
-workflow. Keep it outside this repository. It must contain numeric columns:
-
-| Column | Unit / convention |
+| Column | Units / convention |
 | --- | --- |
-| `x_km` | Distance in km from the beginning of this section |
-| `z_m` | Elevation in m, with the sea surface at 0 and negative values below |
-| `vs_mps` | Positive shear-wave velocity in m/s |
+| `x_km` | Horizontal section distance, km |
+| `z_m` | Elevation, m; sea surface = 0, underwater elevations negative |
+| `vs_mps` | Positive shear-wave speed, m/s |
 
-The geometry distance is shifted to start at zero. CSV coordinates must use
-the same section origin and vertical reference. The **meshing reader expects
-CSV**; the geometry exporter reads a pickle. The meshing reader uses
-nearest-neighbour interpolation, including outside the sample
-extent; it does not estimate or regenerate the Vs model.
+The script uses nearest-neighbour interpolation in the `(x, z)` plane and
+floors sampled positive Vs values at `MIN_VS`. If the section extends outside
+the CSV's horizontal coverage, the nearest available values are extrapolated
+and a warning is printed. **That warning deserves inspection**: the geometry
+and velocity model must use the same horizontal origin and vertical datum.
 
-Set `VS_MODEL_PATH` near the top of `isfjorden_msh.py` to the location of your
-external CSV. Its initial value retains the path from the supplied script.
-Then simply run:
+The existing CSV path is configured with `VS_MODEL_PATH` near the top of
+`isfjorden_msh.py`. Path precedence is:
 
-```bash
-python isfjorden_msh.py
-```
+1. `--vs-model /path/to/vs_model_2d_merged.csv`;
+2. environment variable `ISFJORDEN_VS_MODEL`;
+3. `VS_MODEL_PATH` in the script.
 
-Alternatively, override the path without editing the script:
+Relative input/output paths are resolved from the project directory, not the
+shell's current working directory.
 
-```bash
-python isfjorden_msh.py --vs-model /path/to/vs_model_2d_merged.csv --no-gui
-```
+### Optional: regenerate the geometry TXT
 
-Or set `ISFJORDEN_VS_MODEL` in your environment. Path precedence is command-line
-option, environment variable, then `VS_MODEL_PATH`. Relative paths are resolved
-from the repository directory, so launching from another directory also works.
-
-To validate your inputs before generating the mesh:
+If `data/Isfjorden.txt` already describes the intended section, **do not**
+regenerate it. Otherwise, the independent exporter can extract seafloor and
+basement from the external pickle:
 
 ```bash
-python isfjorden_msh.py --check-inputs
+python convertDataMain.py \
+    --vs-model /path/to/vs_model_2d.pkl \
+    --dx 4.08
 ```
 
-## Generate or update the section geometry
+By default, the exporter writes `data/Isfjorden.txt`. Use its `--output`
+option to choose another TXT, then give that file to the mesher via
+`--geometry`. The exporter requires a sample table (DataFrame or compatible
+dictionary) with `x_km` and `z_m`; it takes `max(z_m)` as the seafloor and
+`min(z_m)` as the basement at each horizontal sample. It resamples these
+profiles at horizontal step `DX`, shifts the distance origin to zero and
+writes `Distance_m`, `Basement`, `Seafloor` in metres. This interpretation is
+valid only if each horizontal sample covers **both** real interfaces.
 
-If `data/Isfjorden.txt` already describes the intended section, use it directly.
-To generate or update it, set `VS_MODEL_PICKLE_PATH` in `convertDataMain.py`
-to your external `vs_model_2d.pkl`, and set `DX` to the desired horizontal
-resampling step in metres. Then run:
+The geometry exporter does not generate or modify the Vs CSV. Its `DX=4.08 m`
+is an explicit resampling choice, not an automatically detected DAS spacing.
+
+## 3. Main commands
+
+Validate the input files without building the Gmsh model:
 
 ```bash
-python convertDataMain.py
-python isfjorden_msh.py
+python3 isfjorden_msh.py --check-inputs
 ```
 
-Geometry generation is a separate preparation step. The meshing entry point
-then reads the existing TXT; it does not automatically regenerate it on every
-run. Changing the pickle requires rerunning the exporter if the interfaces
-have changed.
-
-Alternatively, configure both inputs without editing the scripts:
+Estimate structured sediment size and element count, without meshing:
 
 ```bash
-python convertDataMain.py --vs-model /path/to/vs_model_2d.pkl --dx 4.08
-python isfjorden_msh.py --vs-model /path/to/vs_model_2d_merged.csv --no-gui
+python3 isfjorden_msh.py --plan-only
 ```
 
-The exporter writes to `data/Isfjorden.txt` by default. Use `--output` to select
-another TXT path, then pass that same path to the meshing script with
-`--geometry`. Relative paths are resolved from the directory containing the
-corresponding script. An existing destination TXT is overwritten.
+**Generate a new mesh (single command):**
 
-### Pickle contents and export calculation
+```bash
+python3 isfjorden_msh.py --no-gui
+```
 
-`load_pickle_df()` accepts a pandas DataFrame or a dictionary of sample columns
-that can be converted to a DataFrame. The required columns are `x_km` and
-`z_m`: one row per sampled position. Other columns, including `vs_mps`, are
-not used for extracting these profiles. A dictionary containing a 2D velocity
-matrix and separate coordinate axes is not this supported sample-table format.
+This invokes both local repair phases automatically if Gmsh leaves triangles.
+There is no separate mandatory repair command after a successful generation.
 
-`export_bathy_from_pkl()` performs these operations:
+To keep an existing validated result safe, select an **empty output directory**:
 
-1. Convert `x_km` to metres and group samples by horizontal position.
-2. Take `max(z_m)` as the seafloor and `min(z_m)` as the basement at each position.
-3. Build a regular horizontal grid with `np.arange(x_min, x_max, DX)`.
-4. Linearly interpolate the two interface profiles onto that grid.
-5. Subtract the first grid position so the output distance starts at zero.
-6. Write the tab-separated columns `Distance_m`, `Basement`, `Seafloor`,
-   with a header and six decimal places.
+```bash
+python3 isfjorden_msh.py \
+    --no-gui \
+    --outer-algorithm 5 \
+    --output-dir output_test
+```
 
-Because elevations below the sea surface are negative, the maximum `z_m`
-is the shallower interface. **This extraction is valid only if the model samples
-include both interfaces at every horizontal position.** A model cropped to an
-interior depth range would export the crop limits rather than the true interfaces.
-The exporter checks finite coordinates, strictly negative seafloor elevations,
-nonzero sediment thickness at each input position, a positive finite `DX`, and
-enough input/output positions to create a section.
+Available water/basement unstructured algorithms: `5` = Delaunay (**validated
+default**), `6` = Frontal-Delaunay, `8` = Frontal-Delaunay for Quads. These
+change only the outer surface mesher; sediment transfinite constraints remain.
+Algorithms `6` and `8` are options for experimentation, **not validated
+alternatives for the supplied case**.
 
-`DX=4.08 m` retains the previous export setting. It is an explicit resampling
-parameter and is not read automatically from DAS metadata. The last input
-position is excluded by `np.arange`, so the exported section ends slightly
-before it; this preserves the original grid convention.
+The generator **refuses to overwrite** an existing `Isfjorden.msh` or
+`materials_generated.json`. Renaming only the mesh does not release the output
+directory if the material JSON remains. Never remove a canonical result just
+to run a test: use `--output-dir` instead.
 
-The origin shift applies only to the geometry TXT. If the pickle starts at a
-nonzero `x_km`, the matching Vs CSV must use that same shifted section origin
-before meshing. The exporter does not rewrite the CSV or copy the external
-model into the repository.
+## 4. Main parameters
 
-The conversion helpers contain no MATLAB loading, plotting, velocity-array
-export, or alternate geometry/velocity file generation. They use only Python's
-standard library, NumPy and pandas, already covered by `requirements.txt`.
+Parameters are grouped at the beginning of `isfjorden_msh.py`.
 
-## Outputs and parameters
-
-The same command writes `output/Isfjorden.msh` (Gmsh 2.2, first-order
-quadrilaterals only) and `output/materials_generated.json`. Outputs are ignored
-by Git. Use `--output-dir /path/to/output` to choose another destination, or
-`--geometry /path/to/section.txt` to use another section with the same format.
-
-Parameters are grouped at the top of `isfjorden_msh.py`: `FMAX=50 Hz`,
-`NPPW=6`, `MIN_VS=100 m/s`, `VS_BIN=10 m/s`, `N_VERTICAL=20`, mesh-size limits
-`LC_MIN=1 m` / `LC_MAX=20 m`, and basement padding `50 m`. Sediment target size
-is `Vs / (FMAX * NPPW)`, clipped to those limits and sampled at mid-depth in
-each column. The minimum-size limit can therefore relax the requested points
-per wavelength at low Vs; review these parameters for your simulation.
-
-Sediment cell-centre Vs is floored and quantized into `sed_vs_*` material
-groups. Water and basement retain `socle_1` and `socle_3`; the material JSON
-uses these same names. Domain interfaces and adjacent sediment cells share
-points and curves. Interfaces use straight segments between section samples.
-Gmsh uses algorithm 8, Blossom recombination and subdivision into quadrilaterals;
-subdivision can make the final elements smaller than the target size.
-The full section contains 4,985 columns and 99,680 sediment cells before mesh
-refinement, so generation can be expensive.
-
-This repository stops at the `.msh` mesh and material JSON. Conversion to
-Exodus `.e`, receivers and solver configuration belong to the separate
-simulation workflow.
-
-## How the mesh is built
-
-The workflow first constructs the geometry, assigns target mesh sizes and
-material groups, and then asks Gmsh to discretize the surfaces. Gmsh generates
-the mesh; it does not compute acoustic propagation or estimate material
-properties in this workflow.
-
-### 1. Read the section and define the three domains
-
-The section TXT can be supplied directly or generated beforehand by
-`convertDataMain.py` using `export_bathy_from_pkl()` as described above.
-
-`load_inputs()` in `isfjorden_msh.py` reads the section file and shifts its
-distance axis so that the first sample is at `x=0`. At each horizontal position,
-the file provides the seafloor and basement elevations. These define:
-
-| Domain | Upper boundary | Lower boundary |
+| Parameter | Current default | Meaning |
 | --- | --- | --- |
-| Water | Flat sea surface at `z=0` | Seafloor profile |
+| `FMAX` | `50 Hz` | Frequency used for target element size and material attenuation metadata |
+| `NPPW` | `6` | Nominal points/elements per shortest wavelength used by the sizing rule |
+| `MIN_VS` | `100 m/s` | Lower bound applied to sediment Vs samples |
+| `VS_BIN` | `10 m/s` | Quantization step of sediment material groups |
+| `N_VERTICAL` | `20` | Number of sediment geometric layers |
+| `LC_MIN`, `LC_MAX` | `1 m`, `20 m` | Bounds on nominal sediment sizing targets |
+| `BASEMENT_PADDING` | `50 m` | Basement domain bottom below the deepest basement profile |
+| `SEDIMENT_VERTICAL_PERCENTILE` | `95` | High percentile used to choose conforming vertical transfinite divisions |
+| `MAX_SEDIMENT_QUADS` | `3,500,000` | Preflight safety limit on the estimated number of sediment quads |
+| `WATER_LC_FAR` | `8 m` | Far-field target element size in water |
+| `WATER_BOTTOM_KEEP_DISTANCE` | `5 m` | Distance from seabed at which near-interface resolution is retained |
+| `WATER_BOTTOM_TRANSITION_DISTANCE` | `35 m` | Distance at which far-field water sizing is reached |
+| `WATER_PROTECTED_LC` | `5 m` | Target size near source/receivers |
+| `WATER_PROTECTED_KEEP_RADIUS` | `20 m` | Radius within which protected sizing is retained |
+| `WATER_PROTECTED_TRANSITION_RADIUS` | `50 m` | Transition radius toward far-field sizing |
+| `USE_GLOBAL_QUAD_SUBDIVISION` | `False` | Must remain disabled for the validated hybrid configuration |
+
+The nominal element-size rule for sediments is:
+
+```text
+lc_sed(x) = clip(Vs(x, mid-sediment-depth) / (FMAX × NPPW), LC_MIN, LC_MAX)
+```
+
+Water uses 1500 m/s for its nominal near-interface scale; basement uses
+1600 m/s for its nominal scale. `LC_MIN` may relax the requested wavelength
+resolution at low Vs. The final mesh is shaped by geometry, shared interface
+constraints and the chosen meshing algorithm, not by these targets alone.
+
+Water sizing uses a smooth transition from the seabed to the far water and
+protects neighbourhoods around configured source and receiver centres.
+These are **sizing fields**, not additional material or interface geometry.
+
+## 5. How the mesh is built
+
+### 5.1 Geometry and physical coordinates
+
+`load_inputs()` reads `data/Isfjorden.txt`, shifts the first horizontal position
+to `x=0`, and requires strictly increasing distances and
+`Basement < Seafloor < 0`. The three domains are:
+
+| Domain | Top | Bottom |
+| --- | --- | --- |
+| Water | Flat surface, elevation `0` | Seafloor profile |
 | Sediments | Seafloor profile | Basement profile |
-| Basement rock | Basement profile | Flat bottom at `min(Basement) - BASEMENT_PADDING` |
+| Basement | Basement profile | `min(Basement) - BASEMENT_PADDING` |
 
-The left and right ends are closed with vertical boundaries. The bottom is
-50 m below the deepest basement sample by default, so the rock thickness
-varies along the section.
+The section has **4,985 horizontal columns**, spans approximately **20.335 km**
+and contains **4,984 horizontal intervals** in the validated configuration.
 
-The physical coordinates are called `(x, z)` in the scripts. Points are passed
-to Gmsh as `addPoint(x, z, 0, lc)`: the physical elevation is stored in Gmsh's
-second coordinate, and its third coordinate is zero. The mesh therefore lies
-in Gmsh's XY plane, even though it represents a vertical section. Preserve this
-convention when converting the mesh for a solver.
+The physical `(x, z)` section is stored in Gmsh's XY plane via
+`addPoint(x, z, 0, lc)`: Gmsh's *second* coordinate is physical elevation; its
+third coordinate is zero. Do not interpret that Gmsh Y value as geographical
+northing when using the result downstream.
 
-### 2. Construct points, curves and surfaces
+The profiles are piecewise linear between sample points. The geometry uses
+Gmsh's built-in `geo` kernel (points, lines, curve loops and plane surfaces).
 
-The helpers use Gmsh's built-in geometry kernel, `gmsh.model.geo`.
-The construction follows this hierarchy:
+### 5.2 Structured sediment geometry and meshing
 
-| Object | Role in this repository | Gmsh call |
-| --- | --- | --- |
-| Point | A position on an interface or inside the sediment grid | `addPoint()` |
-| Curve | A straight segment between two points | `addLine()` |
-| Curve loop | An ordered, closed set of boundary curves | `addCurveLoop()` |
-| Surface | The region enclosed by a curve loop | `addPlaneSurface()` |
-
-`add_points()` creates the interface points and assigns a target mesh size
-`lc` to each point. `add_edges()` connects consecutive points. The profiles
-are therefore piecewise linear: the mesh follows straight segments between
-the input samples rather than a smoothed spline.
-
-`add_outer_domain()` closes the water and rock regions around their shared
-interface profiles. Each is created as one geometric surface. The sediments
-are divided into many smaller surfaces, as described below.
-
-### 3. Divide the sediments into geometric cells
-
-`add_layer_variable_vs_2d()` places `N_VERTICAL + 1` points in each sediment
-column, including the seafloor and basement points. For column `i`, a point
-at subdivision index `j` has elevation:
+Each sediment column is split into `N_VERTICAL` geometric layers:
 
 ```text
 a = j / N_VERTICAL
-z(i, j) = (1 - a) * Seafloor(i) + a * Basement(i)
+z(i, j) = (1 - a) × Seafloor(i) + a × Basement(i)
 ```
 
-With `N_VERTICAL=20`, each column has 20 equal fractions of its local sediment
-thickness. Their thickness in metres varies with the separation between the
-two interfaces. Points at the same subdivision index are connected across
-adjacent columns, giving four-sided geometric cells that follow both profiles.
+For each neighbouring pair of columns, the corresponding layer is one
+four-sided geometric surface. With the current section that gives
+`4,984 × 20 = 99,680` sediment surfaces. A geometric surface is **not** a
+single final mesh element.
 
-For `nx` section samples, the number of sediment surfaces is:
+All sediment grid edges are **shared entities**, not independently recreated
+coincident lines. `setTransfiniteCurve()` assigns matching node counts along
+all corresponding horizontal and vertical edges, followed by
+`setTransfiniteSurface()` and `setRecombine()` for each sediment surface.
 
-```text
-number_of_sediment_surfaces = (nx - 1) * N_VERTICAL
-```
+The horizontal subdivisions are selected from local horizontal spacing and
+sediment sizing targets; the vertical subdivisions are common across each
+layer throughout the section. The vertical count is selected from the
+`SEDIMENT_VERTICAL_PERCENTILE` to avoid a single deep outlier exploding mesh
+size. The preflight prints the resulting resolution relative to requested
+sizes and refuses an estimated count above `MAX_SEDIMENT_QUADS`.
 
-The supplied section has 4,985 samples, giving 99,680 sediment surfaces.
-**A geometric cell is not necessarily one final mesh element.** Gmsh can place
-multiple quadrilaterals inside it. Increasing `N_VERTICAL` changes the
-geometric and material sampling; it does not directly prescribe the final
-number of elements through the sediment thickness.
+In the validated run, this produced **1,494,600 structured sediment quads**:
+4–5 subdivisions per horizontal interval and 3 subdivisions per vertical
+geometric layer. **No sediment triangles were generated.**
 
-### 4. Share interfaces between neighbouring regions
+### 5.3 Unstructured water and basement
 
-Each sediment edge is created once and reused by its neighbouring cells.
-The water uses the same seafloor points and curves as the sediment grid;
-the rock uses the same basement points and curves.
+Water and basement are each one large geometric surface, sharing their
+seafloor/basement boundary curves with the sediment surfaces. Only these two
+regions use the selected unstructured algorithm (`--outer-algorithm 5` by
+default) and standard Blossom recombination.
 
-When building a curve loop, a negative curve tag means that the existing
-curve is traversed in the opposite direction. It does not create a second
-curve. This lets neighbouring surfaces use the same edge while closing their
-loops in the required order.
+Gmsh settings for the validated route are:
 
-Sharing these entities makes the interface mesh conforming: adjacent surfaces
-use the same mesh nodes along their common boundary. Creating separate,
-coincident curves would not by itself guarantee this connectivity. Whether
-those shared nodes are used correctly for acoustic/elastic coupling is then
-a responsibility of the solver and mesh conversion workflow.
-
-### 5. Use Vs to choose target element sizes
-
-The CSV reader converts `x_km` to metres and builds a nearest-neighbour
-interpolator in `(x, z)`. At any queried position, the interpolator returns
-the closest input sample's velocity. Positive values below `MIN_VS` are raised
-to `MIN_VS=100 m/s` before interpolation.
-
-The target size is based on the wavelength at the highest frequency:
-
-```text
-wavelength = wave_speed / FMAX
-target_size = wavelength / NPPW
-```
-
-For sediments, `generate_mesh()` queries Vs halfway between the seafloor and
-basement in each column. `lc_from_vs()` then computes:
-
-```text
-lc_sed(i) = clip(Vs_at_column_mid_depth / (FMAX * NPPW), LC_MIN, LC_MAX)
-```
-
-With `FMAX=50 Hz`, `NPPW=6` and the default size limits:
-
-| Mid-depth sediment Vs | Size before clipping | Assigned sediment size |
+| Gmsh setting | Value | Purpose |
 | --- | --- | --- |
-| 100 m/s | 0.333 m | 1 m |
-| 300 m/s | 1 m | 1 m |
-| 600 m/s | 2 m | 2 m |
+| `Mesh.Algorithm` | `5` by default | Delaunay on water/basement (assigned per outer surface) |
+| `Mesh.RecombineAll` | `0` | Avoid global recombination affecting sediment transfinite surfaces |
+| `Mesh.RecombinationAlgorithm` | `1` | Standard Blossom recombination |
+| `Mesh.RecombineMinimumQuality` | `0.05` | Blossom recombination preference |
+| `Mesh.SubdivisionAlgorithm` | `0` | **No global all-element subdivision** |
+| `Mesh.Smoothing` | `10` | Gmsh smoothing setting |
+| `Mesh.ElementOrder` | `1` | Linear elements |
+| `Mesh.MshFileVersion` | `2.2` | Format of saved file |
+| `Mesh.Binary` | `1` | Binary MSH output |
+| `Mesh.SaveAll` | `0` | Keep grouped physical elements |
 
-Water uses `1500 / (FMAX * NPPW)`, or 5 m with the defaults. Rock uses its
-shear-wave speed, `1600 / (FMAX * NPPW)`, or about 5.33 m. At the seafloor,
-the assigned size is the smaller of the water and sediment targets; at the
-basement interface, it is the smaller of the rock and sediment targets.
+Blossom can leave some triangle pairs when a direct merge would produce
+poor-quality quads. This is **expected at the intermediate stage**, not an
+acceptable final result. The generator repairs them automatically, locally.
 
-These sizes guide mesh generation; they are not exact final edge lengths.
-Small sizes on shared boundaries can also refine the neighbouring water or
-rock domain. The later subdivision step further increases mesh density.
+### 5.4 Automatic repair — no global remeshing
 
-The sediment size is sampled once per column and used throughout that column,
-while material Vs is sampled separately in every geometric cell. It is not a
-depth-dependent sizing field. If Vs varies strongly with depth, the mid-depth
-value may miss a slower layer. Also, `LC_MIN=1 m` raises the 0.333 m target in
-the first example, so the sizing rule alone does not guarantee six elements
-per wavelength everywhere in the final mesh.
+`meshing_functions.ensure_all_quads()` implements two repair phases:
 
-### 6. Assign a material to each sediment cell
+1. **Existing-node retile:** replace a pair of neighbouring triangles plus a
+   suitable neighbouring quad with a different local quad tiling, without
+   introducing nodes.
+2. **Local Steiner patches:** for any triangles remaining, retile a small patch
+   using new **surface-interior** nodes. Alternate patches are considered to
+   avoid conflicts between adjacent repairs. Up to **three** Steiner passes
+   are allowed; later passes can use newly formed quads as neighbours.
 
-For each sediment surface, `add_layer_variable_vs_2d()` queries Vs at the
-midpoint in horizontal position and in subdivision fraction. It rounds that
-value into a `VS_BIN` velocity class:
+The repair works on the existing in-memory mesh. It **does not rerun Gmsh's
+2D meshing**, invoke a global optimizer, or change the coordinates of existing
+nodes or the 1D boundary/interface discretization. It refuses overlapping
+patch replacements, residual triangles and unacceptable quads.
+
+For the validated run, the intermediate Gmsh mesh contained **284 triangles**
+(260 water, 24 basement). Phase 1 removed **52**; the first Steiner pass
+removed **230** more; a second Steiner pass removed the final **2**.
+
+### 5.5 Material and boundary physical groups
+
+The model assigns the following 2D physical groups:
+
+| Group name | Meaning | Material section |
+| --- | --- | --- |
+| `socle_1` | Water | `acoustic_2d` |
+| `socle_3` | Basement | `viscoelastic_2d` |
+| `sed_vs_<Vs_class>` | Sediment material classes, quantized by `VS_BIN` | `viscoelastic_2d` |
+
+Each sediment *geometric surface* is assigned a material by sampling Vs at
+its centre and rounding to the nearest `VS_BIN`. All final quads within that
+surface inherit that material class. Vs is **not** interpolated separately at
+each final quad centre. In the validated run there were **36** sediment
+material classes.
+
+`materials_generated.json` records the corresponding density, P-wave speed,
+S-wave speed where applicable, and attenuation parameters. Defaults are:
+water (`rho=1000`, `vp=1500`); sediments (`rho=1800`, `vp=1800`, Vs per class,
+`q_kappa=100`, `q_mu=50`); basement (`rho=2400`, `vp=4000`, `vs=1600`,
+`q_kappa=250`, `q_mu=150`). Attenuation reference `f_att` follows `FMAX` in
+the main generator.
+
+The geometry also defines explicit **1D physical curve groups**:
+
+- `xmin`, `xmax`, `zmin`, `zmax`: exterior boundaries;
+- `socle_1|sed_vs_*`: water-to-upper-sediment interfaces, split according to
+  the material on the sediment side.
+
+The internal sediment/basement edges are geometrically shared and checked for
+conformity; they are not necessarily separate named 1D physical groups.
+The validated model contained **50 physical groups** in total (2D and 1D),
+and **33,158 1D mesh segments**.
+
+## 6. Validation and safe outputs
+
+A successful `isfjorden_msh.py` run does **not** blindly save Gmsh's first
+result. It performs these checks:
+
+1. After Gmsh generation, verify that shared interface curves are correctly
+   represented by neighbouring 2D element edges.
+2. Write a restartable **raw checkpoint** `Isfjorden.unrepaired.msh` before
+   triangle repair.
+3. Repair residual triangles and require **only Gmsh type 3** 2D elements
+   (4-node quadrilaterals).
+4. Require `minSICN > 0.05` globally; print a warning inventory for quads with
+   `minSICN < 0.1`.
+5. Compare physical groups, 1D segments, original geometry and surface areas
+   before/after local repair. Geometry is compared by **spatial positions**,
+   because Gmsh may renumber node tags on rewriting.
+6. Recheck interfaces and global quad edge incidence: no unaccounted cracks,
+   nonmanifold edges or missing outer-boundary edges.
+7. Write `Isfjorden.incomplete.msh`, **reopen it**, and rerun the key geometric,
+   topological and quality audits.
+8. Only after all checks pass, publish `Isfjorden.msh` and remove the successful
+   raw checkpoint.
+
+The resulting canonical outputs are:
 
 ```text
-Vs_class = max(MIN_VS, round(Vs / VS_BIN) * VS_BIN)
-material_name = "sed_vs_<Vs_class>"
+output_mesh/
+├── Isfjorden.msh
+└── materials_generated.json
 ```
 
-For example, with `VS_BIN=10 m/s`, 143 m/s becomes `sed_vs_140` and 147 m/s
-becomes `sed_vs_150`. Every final element within that geometric surface inherits
-the same material class; Vs is not reevaluated at each final element's centre.
+An optional downstream conversion may also place `Isfjorden.e` here. It is
+**not** a product of `isfjorden_msh.py`.
 
-Surfaces with the same class are collected into one **physical group**, even
-if they are spatially separated. After `gmsh.model.geo.synchronize()` makes
-the constructed geometry available to the model, `add_physical_group()`
-registers the following surface groups:
+**Never use** an intermediate `.unrepaired.msh` or `.incomplete.msh` in a
+simulation. If generation or repair fails, the program raises an error instead
+of silently declaring success. Existing canonical outputs are protected
+against accidental overwriting.
 
-| Physical group name | Numeric tag | Material JSON section |
-| --- | --- | --- |
-| `socle_1` | 1 | `acoustic_2d` (water) |
-| `socle_3` | 3 | `viscoelastic_2d` (rock) |
-| `sed_vs_*` | Starting at 1000 | `viscoelastic_2d` (sediments) |
+> **Quality caveat.** Passing a chosen `minSICN > 0.05` threshold is not a
+> guarantee of excellent element shapes or stable time integration. In this
+> configuration the minimum is close to the threshold, and the smallest local
+> edges and material wave speeds must be considered when selecting a solver
+> time step. A short numerical test and a convergence study are separate tasks.
 
-The first argument `2` in `addPhysicalGroup(2, ...)` identifies surfaces;
-it is their geometric dimension, not a material number. Sediment group tags
-are assigned in order of first occurrence, so use the group names to interpret
-the corresponding velocity classes.
+## 7. Existing-mesh checks and recovery
 
-Gmsh stores the physical identifiers and names in the mesh. The script writes
-the associated density, wave speeds and attenuation parameters separately in
-`materials_generated.json`. Sediments use constant `rho=1800 kg/m³` and
-`vp=1800 m/s`; only their quantized Vs varies between classes. Editing the CSV
-does not change those other material constants.
+`repair_mesh.py` is the **only optional repair command**. It reuses
+`meshing_functions.py`; no collection of legacy repair scripts is needed.
 
-### 7. Generate quadrilateral elements
-
-`final_meshing()` sets the meshing options and calls
-`gmsh.model.mesh.generate(2)` to discretize curves and surfaces. The principal
-settings in this repository are:
-
-| Option | Value | Purpose |
-| --- | --- | --- |
-| `Mesh.Algorithm` | 8 | Frontal-Delaunay for Quads |
-| `Mesh.RecombineAll` | 1 | Recombine all surfaces |
-| `Mesh.RecombinationAlgorithm` | 1 | Blossom recombination |
-| `Mesh.SubdivisionAlgorithm` | 1 | Subdivide into quadrilaterals |
-| `Mesh.Smoothing` | 10 | Smooth the mesh |
-| `Mesh.ElementOrder` | 1 | First-order elements |
-| `Mesh.MshFileVersion` | 2.2 | Write the MSH 2.2 format |
-
-Recombination joins suitable triangle pairs into quadrilaterals. It may leave
-triangles, so subdivision produces an all-quadrilateral mesh, adding nodes and
-splitting existing elements. A four-sided geometric surface therefore does
-not imply that Gmsh simply fills it with a regular rectangular grid.
-
-The helper checks all generated 2D element types before writing the mesh.
-It accepts only Gmsh type 3, a four-node first-order quadrilateral, and raises
-an error if the mesh is empty or contains another 2D element type. This is an
-element-type check, not a numerical convergence or element-quality test.
-
-### 8. Export and inspect the result
-
-The mesh is written first, then the matching material JSON. With
-`Mesh.SaveAll=0`, exported elements belong to physical groups; all domain
-surfaces are grouped in this workflow. The scripts do not create named 1D
-boundary groups such as `xmin`, `xmax` or `zmin`. Any boundary names required
-by the solver must be handled in the downstream workflow.
-
-Without `--no-gui`, the Gmsh viewer opens after the files have been written.
-You can also reopen the mesh later with:
+### Read-only verification
 
 ```bash
-gmsh output/Isfjorden.msh
+python3 repair_mesh.py output_mesh/Isfjorden.msh --check
 ```
 
-Zoom into the seafloor and basement interfaces to inspect the element layout,
-and examine mesh quality before using the result in a simulation. The material
-groups represent velocity classes, not an interpolated Vs colour field.
-`--check-inputs` only validates the geometry and CSV: it does not build the
-geometry in Gmsh or verify that meshing will succeed.
+Optionally compare a repaired mesh to the **raw/reference MSH** from which it
+was made. The comparison is independent of Gmsh node numbering:
 
-### 9. Understand the main resolution controls
+```bash
+python3 repair_mesh.py \
+    path/to/repaired.msh \
+    --reference path/to/unrepaired.msh \
+    --check
+```
 
-| Parameter | Effect when increased |
-| --- | --- |
-| `FMAX` | Requests smaller elements; also sets `f_att` in the generated sediment and rock materials |
-| `NPPW` | Requests smaller elements without changing the material frequency parameter |
-| `N_VERTICAL` | Creates more sediment surfaces and samples material Vs more finely through the thickness |
-| `VS_BIN` | Uses coarser velocity classes, usually reducing the number of material groups |
-| `LC_MIN` | Prevents smaller sediment sizing targets, potentially relaxing wavelength resolution |
-| `LC_MAX` | Allows larger sediment sizing targets where Vs is high enough |
+### Recover from a raw checkpoint
 
-Geometry sampling, material sampling and final element size are separate
-controls. Refining the mesh alone does not recover detail lost when Vs was
-assigned to geometric cells. Conversely, decreasing `VS_BIN` gives finer
-velocity classes without directly refining the mesh. Select these parameters
-together, then assess convergence with the intended wave solver.
+If a previous run failed after Gmsh finished generating the 2D mesh, the
+`Isfjorden.unrepaired.msh` checkpoint can be repaired **without regenerating
+2.6 million elements**. Use a destination directory with no canonical files:
 
-For Gmsh concepts and option definitions, see the official
-[Gmsh manual](https://gmsh.info/doc/texinfo/gmsh.html), especially
-[tutorial t1: geometry and physical groups](https://gmsh.info/doc/texinfo/gmsh.html#t1)
-and [tutorial t11: quadrangular meshes](https://gmsh.info/doc/texinfo/gmsh.html#t11).
+```bash
+python3 repair_mesh.py \
+    output_mesh/Isfjorden.unrepaired.msh \
+    --repair \
+    --output-dir output_recovered
+```
+
+This creates a new validated `Isfjorden.msh` and matching material JSON only
+if all checks pass. It does not overwrite the input. `--adopt` is intended
+instead for a **prevalidated, already all-quad** mesh: it copies its bytes
+without rewriting Gmsh connectivity and refuses to replace a different
+canonical output.
+
+The recovery tool reconstructs material metadata from the standard group
+names and current generator material constants. If material parameters have
+been customized, verify that they match your intended simulation before
+adopting/recovering an old mesh.
+
+## 8. Optional downstream conversion (separate from meshing)
+
+The mesh generator ends with `.msh` and `materials_generated.json`.
+For the existing separate simulation workflow, the project also contains:
+
+```bash
+python3 gmsh2exodus.py output_mesh/Isfjorden.msh \
+    -o output_mesh/Isfjorden.e
+
+python3 check_exodus_sides_specfem.py output_mesh/Isfjorden.e
+```
+
+These tools are **not invoked by `isfjorden_msh.py` or `repair_mesh.py`**.
+Inspect the converted result and its side sets independently. A viewer can
+occasionally produce misleading rendering artefacts: compare coordinates
+and element connectivity between `.msh` and `.e` before concluding that the
+mesher has generated malformed elements.
+
+## 9. Resolution, reproducibility and limitations
+
+- **Mesh resolution is not material resolution.** `N_VERTICAL` controls
+  geometric/material layers; the transfinite subdivisions control the number
+  of quads *inside* each cell. `VS_BIN` changes material grouping without
+  directly changing spatial resolution.
+- **The external Vs model is a required input.** The script samples it by
+  nearest neighbour and does not rebuild it from the geometry TXT.
+- **Check extrapolation warnings.** An x-range mismatch with the external CSV
+  can affect both target sizes and sediment material assignment.
+- **The default is the tested hybrid algorithm `5`.** Do not switch to global
+  full-quad subdivision: it conflicted with the shared transfinite-interface
+  constraints during previous trials.
+- **Automatic repair is local, not a guarantee.** For a different geometry or
+  Gmsh version, unrepairable triangles or low-quality quads may remain. In
+  that case the generator stops and preserves the raw checkpoint for diagnosis.
+- **Gmsh may renumber tags when the mesh is written.** Compare geometric
+  positions, element edges and physical memberships, not matching node IDs
+  across different files.
+- **Geometric validity does not prove solver stability.** Set the time step
+  using the final smallest physical elements and the chosen wave equations,
+  then test numerical convergence separately.
+
+Official reference: [Gmsh documentation](https://gmsh.info/doc/texinfo/gmsh.html)
+(geometry and physical groups; quadrilateral meshing; Python mesh API).

@@ -10,3 +10,12 @@ vs_model_2d*.pkl
 run_specfem_gpu.sh
 *.log
 *.e
+*.xdmf
+*.csv
+*.metadata
+*.bin
+get_files.txt
+visit_renders/
+visitlog.py
+*.xmf
+*.png
